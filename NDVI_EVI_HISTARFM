@@ -1,0 +1,146 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var matthew_fields_extent = 
+    /* color: #d63000 */
+    /* shown: false */
+    /* displayProperties: [
+      {
+        "type": "rectangle"
+      }
+    ] */
+    ee.Geometry.Polygon(
+        [[[-83.36156008574955, 41.06578441055354],
+          [-83.36156008574955, 40.82097600954069],
+          [-82.95918581817142, 40.82097600954069],
+          [-82.95918581817142, 41.06578441055354]]], null, false);
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+
+//Cropland Data layer
+var cdl = ee.ImageCollection('USDA/NASS/CDL');
+
+//extent of study area
+
+//var mat_fields = ee.FeatureCollection('users/kessi9400/Field_boundaries_matthew');
+var ohio_counties = ee.FeatureCollection('users/kessi9400/counties_Ohio_WGS84');
+
+Map.addLayer(ohio_counties);
+
+//var roi = ee.FeatureCollection('users/kessi9400/Maumee_WGS84');
+
+var outline = ee.Image().byte().paint({
+  featureCollection: ohio_counties,
+  color:1,
+  width:3
+});
+
+//function to generate annual cropland data layer
+var annual_cdl = function(year){
+  //var cdl = ee.ImageCollection('USDA/NASS/CDL');
+  var corn = 1;
+  var soybean = 5;
+  //var crop_id = 5;
+  var cdl_year = ee.Image(cdl.filter(ee.Filter.eq('system:index', String(year))).first()).select('cropland');
+  var cdl_year_crop = cdl_year.eq(corn).updateMask(cdl_year.eq(corn)).toFloat();
+  //var cdl_year_crop = cdl_year.eq(corn).or(cdl_year.eq(soybean)).updateMask(cdl_year.eq(corn).or(cdl_year.eq(soybean))).toFloat();
+  var cdl_annual_clip = cdl_year_crop.clip(ohio_counties);
+  return(cdl_annual_clip);
+};
+
+//Annual Cropland data layer for corn and soybean
+var cdl_2021 = annual_cdl(2021);
+var cdl_2020 = annual_cdl(2020);
+var cdl_2019 = annual_cdl(2019);
+var cdl_2018 = annual_cdl(2018);
+var cdl_2017 = annual_cdl(2017);
+var cdl_2016 = annual_cdl(2016);
+//var cdl_2015 = annual_cdl(2015);
+//var cdl_2014 = annual_cdl(2014);
+//var cdl_2013 = annual_cdl(2013);
+//var cdl_2012 = annual_cdl(2012);
+//var cdl_2011 = annual_cdl(2011);
+//var cdl_2010 = annual_cdl(2010);
+//var cdl_2009 = annual_cdl(2009);
+//var cdl_2008 = annual_cdl(2008);
+
+
+
+//for landsat
+var get_index = function(image) {
+  image = image.multiply(0.0001);
+  var ndvi = image.normalizedDifference(['NIR', 'Red']).rename("NDVI");
+  
+  var evi = image.select('NIR').subtract(image.select('Red')).divide(image.select('NIR').add(image.select('Red').multiply(2.4).add(1)));
+  var evi2 = evi.multiply(2.5).rename('EVI2');
+  
+  var ex_g = image.select('Green').multiply(2).subtract(image.select('Red')).subtract(image.select('Blue')).rename('Ex_G');
+  
+  var sr = image.select('NIR').divide(image.select('Red')).rename('SR');
+  
+  var image1 = image.addBands(ndvi);
+  var image2 = image1.addBands(evi2);
+  var image3 = image2.addBands(ex_g);
+  var image4 = image3.addBands(sr);
+  
+  var image5= image4.select(['NDVI', 'EVI2', 'Ex_G', 'SR']);
+  return(image5); 
+};
+
+// Function to get and rename bands of interest from OLI.
+function rename(img) {
+  return img.select(
+      //['B1_mean_post', 'B2_mean_post', 'B3_mean_post', 'B4_mean_post', 'B5_mean_post', 'B7_mean_post'],
+      ['B2', 'B3', 'B4', 'B8', 'B11', 'B12'],
+      ['Blue', 'Green', 'Red', 'NIR', 'SWIR1', 'SWIR2']);
+}
+//var filled = ee.ImageCollection('projects/KalmanGFwork/GFLandsat_V1');
+
+function maskS2clouds(image) {
+  var qa = image.select('QA60');
+
+  // Bits 10 and 11 are clouds and cirrus, respectively.
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+
+  // Both flags should be set to zero, indicating clear conditions.
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
+      .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
+
+  return image.updateMask(mask);
+}
+
+var filled = ee.ImageCollection('COPERNICUS/S2');
+function getComposite(starttime, endtime){
+  
+var colFilter = ee.Filter.and(
+    ee.Filter.bounds(ohio_counties), ee.Filter.date(starttime, endtime), ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20));
+  
+var filled_season = filled.filter(colFilter).map(maskS2clouds).map(rename);
+
+
+
+var image_composite = filled_season.map(get_index).reduce(ee.Reducer.mean());
+
+var composite_final = image_composite.toFloat();
+return composite_final;
+}
+
+
+var composite = getComposite('2020-07-01', '2020-08-31');
+var masked = composite.updateMask(cdl_2020);
+print(masked);
+var NDVIpalette = ['FFFFFF', 'CE7E45', 'DF923D', 'F1B555', 'FCD163', '99B718',
+               '74A901', '056201',
+                '011301'];
+
+Map.addLayer(outline);
+//Map.addLayer(masked.select('EVI2_mean'),{min:0, max:1, palette: NDVIpalette});
+
+Export.image.toDrive({
+  image: masked,
+  description: 'corn_veg_index_2020',
+  scale: 30,
+  region: ohio_counties,
+  //crs:'EPSG:32617',
+  fileFormat: 'GeoTIFF',
+  //Soybean_NDVI_EVI
+  maxPixels: 5000000000,
+});

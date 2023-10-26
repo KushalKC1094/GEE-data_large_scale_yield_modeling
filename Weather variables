@@ -1,0 +1,79 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var fields_zone = 
+    /* color: #d63000 */
+    /* shown: false */
+    /* displayProperties: [
+      {
+        "type": "rectangle"
+      }
+    ] */
+    ee.Geometry.Polygon(
+        [[[-83.48085621325872, 41.12196085663274],
+          [-83.48085621325872, 40.780723108132385],
+          [-82.80794361560247, 40.780723108132385],
+          [-82.80794361560247, 41.12196085663274]]], null, false);
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+
+var ohio_counties = ee.FeatureCollection('users/kessi9400/counties_Ohio_WGS84');
+
+
+var prismData = ee.ImageCollection("OREGONSTATE/PRISM/AN81d").filterDate('2020-07-01','2020-08-25').select('tmean');
+//var maumee = ee.FeatureCollection('users/kessi9400/Maumee_WGS84');
+
+//some of the fields from Matthew fields
+//var mat_fields = ee.FeatureCollection('users/kessi9400/Field_boundaries_matthew');
+//Map.addLayer(mat_fields);
+
+var average = prismData.reduce(ee.Reducer.mean());
+var average_ohio = average.clip(ohio_counties);
+
+Map.addLayer(average_ohio);
+
+Export.image.toDrive({
+  image: average_ohio,
+  description: '2021_july_aug_temp',
+  scale: 4000,
+  //crs: 'EPSG: 32617',
+  fileFormat: 'GeoTIFF',
+  //region: maumee
+});
+
+/*
+//long term weather data
+//var dataset = ee.ImageCollection('OREGONSTATE/PRISM/Norm81m');
+//var maumee = ee.FeatureCollection('users/kessi9400/Maumee_WGS84');
+
+var precipitation = dataset.select('ppt');
+
+var temp = dataset.select('tmean');
+
+//precipitation
+var ppt_list = precipitation.toList(precipitation.size());
+var june_ppt = ee.Image(ppt_list.get(5));
+var july_ppt = ee.Image(ppt_list.get(6));
+var aug_ppt = ee.Image(ppt_list.get(7));
+
+var ppt_junetoaug = ee.ImageCollection.fromImages([june_ppt, july_ppt, aug_ppt]);
+
+var average_ppt = ppt_junetoaug.reduce(ee.Reducer.sum());
+var average_ppt_maumee = average_ppt.clip(maumee);
+
+//temperature
+var temp_list = temp.toList(temp.size());
+var may_temp = ee.Image(temp_list.get(4));
+var june_temp = ee.Image(temp_list.get(5));
+
+var temp_maytojune = ee.ImageCollection.fromImages([may_temp, june_temp]);
+
+var average_temp = temp_maytojune.reduce(ee.Reducer.mean());
+var average_temp_maumee =  average_temp.clip(maumee);
+
+Export.image.toDrive({
+  image: average_temp_maumee ,
+  description: 'longterm_temp_maytojune',
+  scale: 4000,
+  crs: 'EPSG: 32617',
+  fileFormat: 'GeoTIFF',
+  region: maumee
+});
+*/
