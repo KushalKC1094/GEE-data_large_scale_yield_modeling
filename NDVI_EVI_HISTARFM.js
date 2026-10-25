@@ -1,146 +1,130 @@
-/**** Start of imports. If edited, may not auto-convert in the playground. ****/
-var matthew_fields_extent = 
-    /* color: #d63000 */
-    /* shown: false */
-    /* displayProperties: [
-      {
-        "type": "rectangle"
-      }
-    ] */
-    ee.Geometry.Polygon(
-        [[[-83.36156008574955, 41.06578441055354],
-          [-83.36156008574955, 40.82097600954069],
-          [-82.95918581817142, 40.82097600954069],
-          [-82.95918581817142, 41.06578441055354]]], null, false);
-/***** End of imports. If edited, may not auto-convert in the playground. *****/
+// =============================================================================
+// NDVI_EVI_HISTARFM.js
+//
+// July-August mean vegetation indices (NDVI, EVI2) on corn or soybean fields,
+// from HISTARFM gap-filled monthly Landsat reflectance (30 m).
+// Used in: KC & Khanal (2023), J. Environ. Manage. 330, 117212.
+//
+// Outputs (Tasks tab -> Run):
+//   1. One GeoTIFF per year: <crop>_veg_index_<year>  (30 m, bands NDVI_mean,
+//      EVI2_mean)  -> inputs for the 30-m yield maps
+//   2. One CSV: <crop>_veg_index_by_county  (county-year means)
+//      -> predictors for training the yield model with NASS county yields
+//
+// Before running:
+//   - Join the "HISTARFM collection" Google group, or the collection won't load.
+//     HISTARFM CONUS covers Jan 2009 - Oct 2021.
+//   - Edit the SETTINGS block below.
+//   - After clicking Run, start each export from the Tasks tab.
+// =============================================================================
 
-//Cropland Data layer
+// ---- SETTINGS ---------------------------------------------------------------
+
+var CROP  = 'corn';                // 'corn' or 'soybean'
+var YEARS = [2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019];
+var MONTHS = [7, 8];               // July-August
+var DRIVE_FOLDER = 'GEE_yield_modeling';
+
+// Study counties (public U.S. Census TIGER data, selected by FIPS code):
+// the 14 counties with >50% of their area in the Maumee River Watershed.
+var counties = ee.FeatureCollection('TIGER/2018/Counties')
+  .filter(ee.Filter.inList('GEOID', [
+    '18001', '18003', '18033',            // Indiana: Adams, Allen, DeKalb
+    '26059',                              // Michigan: Hillsdale
+    '39003', '39011', '39039', '39051',   // Ohio: Allen, Auglaize, Defiance, Fulton,
+    '39063', '39069', '39125', '39137',   //       Hancock, Henry, Paulding, Putnam,
+    '39161', '39171'                      //       Van Wert, Williams
+  ]));
+
+// ---- DATA -------------------------------------------------------------------
+
+var CDL_CODES = {corn: 1, soybean: 5};
 var cdl = ee.ImageCollection('USDA/NASS/CDL');
+var histarfm = ee.ImageCollection('projects/KalmanGFwork/GFLandsat_V1');
 
-//extent of study area
+// Mask of the chosen crop for one year, from the Cropland Data Layer
+function cropMask(year) {
+  var cropland = ee.Image(cdl.filter(ee.Filter.eq('system:index', String(year))).first())
+    .select('cropland');
+  return cropland.eq(CDL_CODES[CROP]).selfMask();
+}
 
-//var mat_fields = ee.FeatureCollection('users/kessi9400/Field_boundaries_matthew');
-var ohio_counties = ee.FeatureCollection('users/kessi9400/counties_Ohio_WGS84');
+// HISTARFM red and near-infrared bands (Landsat TM/ETM+ band numbering).
+// Reflectance is stored x10000.
+function renameBands(img) {
+  return img.select(['B3_mean_post', 'B4_mean_post'], ['Red', 'NIR']);
+}
 
-Map.addLayer(ohio_counties);
+// Vegetation indices used in the paper
+//   NDVI = (NIR - Red) / (NIR + Red)
+//   EVI2 = 2.5 * (NIR - Red) / (NIR + 2.4 * Red + 1)
+function addIndices(img) {
+  img = img.multiply(0.0001);
+  var ndvi = img.normalizedDifference(['NIR', 'Red']).rename('NDVI');
+  var evi2 = img.expression('2.5 * (NIR - RED) / (NIR + 2.4 * RED + 1)',
+    {NIR: img.select('NIR'), RED: img.select('Red')}).rename('EVI2');
+  return ee.Image.cat([ndvi, evi2]);
+}
 
-//var roi = ee.FeatureCollection('users/kessi9400/Maumee_WGS84');
+// July-August mean indices for one year, masked to the crop
+function seasonalComposite(year) {
+  var monthly = histarfm
+    .filter(ee.Filter.eq('year', year))
+    .filter(ee.Filter.inList('month', MONTHS));
+  return monthly.map(renameBands).map(addIndices)
+    .reduce(ee.Reducer.mean())          // bands: NDVI_mean, EVI2_mean
+    .updateMask(cropMask(year))
+    .clip(counties)
+    .toFloat()
+    .set('year', year);
+}
 
-var outline = ee.Image().byte().paint({
-  featureCollection: ohio_counties,
-  color:1,
-  width:3
+// ---- CHECK ------------------------------------------------------------------
+
+print('Counties selected (expect 14):', counties.size());
+print('HISTARFM images for first year (expect ' + MONTHS.length + '):',
+      histarfm.filter(ee.Filter.eq('year', YEARS[0]))
+              .filter(ee.Filter.inList('month', MONTHS)).size());
+
+var preview = seasonalComposite(YEARS[YEARS.length - 1]);
+Map.centerObject(counties, 8);
+Map.addLayer(preview.select('NDVI_mean'),
+  {min: 0, max: 1, palette: ['FFFFFF', 'CE7E45', 'FCD163', '99B718', '207401', '011301']},
+  CROP + ' NDVI ' + YEARS[YEARS.length - 1]);
+Map.addLayer(ee.Image().byte().paint(counties, 1, 2), {palette: '000000'}, 'Counties');
+
+// ---- EXPORTS ----------------------------------------------------------------
+// These create tasks in the Tasks tab. Earth Engine does not start them
+// automatically: open the Tasks tab and click Run on each one.
+
+// 1. One 30-m GeoTIFF per year
+YEARS.forEach(function(year) {
+  Export.image.toDrive({
+    image: seasonalComposite(year),
+    description: CROP + '_veg_index_' + year,
+    folder: DRIVE_FOLDER,
+    region: counties.geometry(),
+    scale: 30,
+    crs: 'EPSG:32617',
+    fileFormat: 'GeoTIFF',
+    maxPixels: 1e10
+  });
 });
 
-//function to generate annual cropland data layer
-var annual_cdl = function(year){
-  //var cdl = ee.ImageCollection('USDA/NASS/CDL');
-  var corn = 1;
-  var soybean = 5;
-  //var crop_id = 5;
-  var cdl_year = ee.Image(cdl.filter(ee.Filter.eq('system:index', String(year))).first()).select('cropland');
-  var cdl_year_crop = cdl_year.eq(corn).updateMask(cdl_year.eq(corn)).toFloat();
-  //var cdl_year_crop = cdl_year.eq(corn).or(cdl_year.eq(soybean)).updateMask(cdl_year.eq(corn).or(cdl_year.eq(soybean))).toFloat();
-  var cdl_annual_clip = cdl_year_crop.clip(ohio_counties);
-  return(cdl_annual_clip);
-};
+// 2. County-year means, one row per county per year
+var table = ee.FeatureCollection(YEARS.map(function(year) {
+  return seasonalComposite(year).reduceRegions({
+    collection: counties.select(['GEOID', 'NAME', 'STATEFP']),
+    reducer: ee.Reducer.mean(),
+    scale: 30,
+    tileScale: 4
+  }).map(function(f) { return f.set('year', year).setGeometry(null); });
+})).flatten();
 
-//Annual Cropland data layer for corn and soybean
-var cdl_2021 = annual_cdl(2021);
-var cdl_2020 = annual_cdl(2020);
-var cdl_2019 = annual_cdl(2019);
-var cdl_2018 = annual_cdl(2018);
-var cdl_2017 = annual_cdl(2017);
-var cdl_2016 = annual_cdl(2016);
-//var cdl_2015 = annual_cdl(2015);
-//var cdl_2014 = annual_cdl(2014);
-//var cdl_2013 = annual_cdl(2013);
-//var cdl_2012 = annual_cdl(2012);
-//var cdl_2011 = annual_cdl(2011);
-//var cdl_2010 = annual_cdl(2010);
-//var cdl_2009 = annual_cdl(2009);
-//var cdl_2008 = annual_cdl(2008);
-
-
-
-//for landsat
-var get_index = function(image) {
-  image = image.multiply(0.0001);
-  var ndvi = image.normalizedDifference(['NIR', 'Red']).rename("NDVI");
-  
-  var evi = image.select('NIR').subtract(image.select('Red')).divide(image.select('NIR').add(image.select('Red').multiply(2.4).add(1)));
-  var evi2 = evi.multiply(2.5).rename('EVI2');
-  
-  var ex_g = image.select('Green').multiply(2).subtract(image.select('Red')).subtract(image.select('Blue')).rename('Ex_G');
-  
-  var sr = image.select('NIR').divide(image.select('Red')).rename('SR');
-  
-  var image1 = image.addBands(ndvi);
-  var image2 = image1.addBands(evi2);
-  var image3 = image2.addBands(ex_g);
-  var image4 = image3.addBands(sr);
-  
-  var image5= image4.select(['NDVI', 'EVI2', 'Ex_G', 'SR']);
-  return(image5); 
-};
-
-// Function to get and rename bands of interest from OLI.
-function rename(img) {
-  return img.select(
-      //['B1_mean_post', 'B2_mean_post', 'B3_mean_post', 'B4_mean_post', 'B5_mean_post', 'B7_mean_post'],
-      ['B2', 'B3', 'B4', 'B8', 'B11', 'B12'],
-      ['Blue', 'Green', 'Red', 'NIR', 'SWIR1', 'SWIR2']);
-}
-//var filled = ee.ImageCollection('projects/KalmanGFwork/GFLandsat_V1');
-
-function maskS2clouds(image) {
-  var qa = image.select('QA60');
-
-  // Bits 10 and 11 are clouds and cirrus, respectively.
-  var cloudBitMask = 1 << 10;
-  var cirrusBitMask = 1 << 11;
-
-  // Both flags should be set to zero, indicating clear conditions.
-  var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
-      .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
-
-  return image.updateMask(mask);
-}
-
-var filled = ee.ImageCollection('COPERNICUS/S2');
-function getComposite(starttime, endtime){
-  
-var colFilter = ee.Filter.and(
-    ee.Filter.bounds(ohio_counties), ee.Filter.date(starttime, endtime), ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20));
-  
-var filled_season = filled.filter(colFilter).map(maskS2clouds).map(rename);
-
-
-
-var image_composite = filled_season.map(get_index).reduce(ee.Reducer.mean());
-
-var composite_final = image_composite.toFloat();
-return composite_final;
-}
-
-
-var composite = getComposite('2020-07-01', '2020-08-31');
-var masked = composite.updateMask(cdl_2020);
-print(masked);
-var NDVIpalette = ['FFFFFF', 'CE7E45', 'DF923D', 'F1B555', 'FCD163', '99B718',
-               '74A901', '056201',
-                '011301'];
-
-Map.addLayer(outline);
-//Map.addLayer(masked.select('EVI2_mean'),{min:0, max:1, palette: NDVIpalette});
-
-Export.image.toDrive({
-  image: masked,
-  description: 'corn_veg_index_2020',
-  scale: 30,
-  region: ohio_counties,
-  //crs:'EPSG:32617',
-  fileFormat: 'GeoTIFF',
-  //Soybean_NDVI_EVI
-  maxPixels: 5000000000,
+Export.table.toDrive({
+  collection: table,
+  description: CROP + '_veg_index_by_county',
+  folder: DRIVE_FOLDER,
+  fileFormat: 'CSV',
+  selectors: ['GEOID', 'NAME', 'STATEFP', 'year', 'NDVI_mean', 'EVI2_mean']
 });
