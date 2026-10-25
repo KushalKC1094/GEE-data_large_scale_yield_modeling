@@ -105,7 +105,7 @@ YEARS.forEach(function(year) {
     folder: DRIVE_FOLDER,
     region: counties.geometry(),
     scale: 30,
-    crs: 'EPSG:32617',
+    crs: 'EPSG:4326',
     fileFormat: 'GeoTIFF',
     maxPixels: 1e10
   });
