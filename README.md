@@ -6,7 +6,7 @@ This repository contains the code behind the following paper:
 
 > KC, K., & Khanal, S. (2023). Agricultural productivity and water quality tradeoffs of winter cover crops at a landscape scale through the lens of remote sensing. *Journal of Environmental Management*, 330, 117212. https://doi.org/10.1016/j.jenvman.2022.117212
 
-The scripts estimate corn and soybean yields at 30-m resolution across the Maumee River Watershed (Ohio, Indiana, and Michigan) from satellite vegetation indices and weather data, using **county-level yield statistics from USDA NASS** to train the models. They then compare the predicted yields on fields with and without winter cover crops. The repository is preserved as a reference resource for students and researchers who wish to understand, reuse, or extend the existing workflows.
+The scripts estimate corn and soybean yields at 30-m resolution across the Maumee River Watershed (Ohio, Indiana, and Michigan) from satellite vegetation indices and weather data, using **county-level yield statistics from USDA NASS** to train the models. It then compares the predicted yields on fields with and without winter cover crops. The repository is preserved as a reference resource for students and researchers who wish to understand, reuse, or extend the existing workflows.
 
 > **Repository status: Historical research code.** The scripts are preserved for future reference and are not actively maintained. Compatibility with current software, datasets, and Google Earth Engine assets has not necessarily been verified.
 
