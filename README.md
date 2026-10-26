@@ -14,7 +14,8 @@ The scripts estimate corn and soybean yields at 30-m resolution across the Maume
 
 1. **Read the paper.** It explains the study area, data, methods, and results in detail; the code does not repeat them. Use the DOI above.
 2. **Follow the [Workflow](#workflow)** below to see which script carries out each step of the analysis.
-3. **See the companion repository** [Winter-cover-crop-mapping](https://github.com/KushalKC1094/Winter-cover-crop-mapping) for code related to the winter cover crop maps used in the final step.
+3. **To run the analysis yourself**, use the updated scripts: the two Earth Engine scripts to [download the data](#running-the-earth-engine-scripts), then `Yield_modeling_updated.R` to [fit the models and map yield on your computer](#running-the-yield-model-locally).
+4. **See the companion repository** [Winter-cover-crop-mapping](https://github.com/KushalKC1094/Winter-cover-crop-mapping) for code related to the winter cover crop maps used in the final step.
 
 ## Study Summary
 
@@ -54,14 +55,16 @@ See [Running the Earth Engine scripts](#running-the-earth-engine-scripts) for ho
 
 | Script | What it does |
 |---|---|
-| `Yield_modeling_field_scale.R` | Trains corn and soybean models predicting county yield (t/ha) from mean NDVI, mean EVI2, August temperature, and August precipitation. Compares MLR, RF, and SVM with a 4:1 train–test split and 10-fold cross-validation for tuning. |
+| `Yield_modeling_updated.R` | **Recommended for new users.** Updated version of the original script that runs as is on your computer, using the data downloaded by the Earth Engine scripts. Builds the training table, compares MLR, RF, and SVM, maps yield (step 3), and validates the maps against field yield data. See [Running the yield model locally](#running-the-yield-model-locally). |
+| `Yield_modeling_field_scale.R` | *Original script used for the paper, kept for reference.* Trains corn and soybean models predicting county yield (t/ha) from mean NDVI, mean EVI2, August temperature, and August precipitation. Compares MLR, RF, and SVM with a 4:1 train–test split and 10-fold cross-validation for tuning. Requires manual input preparation; see [Using the original modeling script](#using-the-original-modeling-script). |
 | `Plotting_yield_data.R` | Plots observed vs. predicted yields from a model's output table and calculates R², RMSE, and MAE. |
 
 ### 3. Map predicted yield
 
 | Script | What it does |
 |---|---|
-| `Yield_modeling_field_scale.R` (final section) | Applies the selected model to the 30-m vegetation index and weather rasters to produce yearly corn and soybean yield maps (`<year>_corn_yield.tif`, `<year>_soybean_yield.tif`). |
+| `Yield_modeling_updated.R` | Applies the selected model to the 30-m vegetation index and weather rasters to produce yield maps for every year (`<year>_corn_yield.tif`, `<year>_soybean_yield.tif`). |
+| `Yield_modeling_field_scale.R` (final section) | Original version: maps one year at a time. |
 | `plot_corn_yield.R`, `plot_soybean_yield.R` | Map the predicted yield rasters for the watershed. |
 
 ### 4. Compare yield with and without cover crops
@@ -103,11 +106,60 @@ Please inspect each script to understand its specific inputs, assumptions, depen
 | `<year>_temp_aug.tif`, `<year>_ppt_aug.tif` | ~4-km rasters of August mean temperature (°C) and total precipitation (mm). |
 | `weather_aug_by_county.csv` | `GEOID, NAME, STATEFP, year, mean_aug_temp, mean_aug_ppt` (precipitation is the August total, named to match the model formula). |
 
-All rasters are exported in geographic coordinates (EPSG:4326), so the weather and vegetation index rasters can be aligned with `resample()` in R. Large exports may be split into several tiles (e.g. `corn_veg_index_2019-0000000000-0000000000.tif`); merge them before use.
+All rasters are exported in geographic coordinates (EPSG:4326), so the weather and vegetation index rasters can be aligned with `resample()` in R. Large exports may be split into several tiles (e.g. `corn_veg_index_2019-0000000000-0000000000.tif`); `Yield_modeling_updated.R` merges them automatically.
 
-### Preparing inputs for `Yield_modeling_field_scale.R`
+## Running the Yield Model Locally
 
-The modeling script reads a training table per crop (`regression_in_R_corn.csv`, `regression_in_R_soybean.csv`) and, for mapping, rasters with specific names.
+`Yield_modeling_updated.R` runs on your own computer (Windows, macOS, or Linux) with R, using the files downloaded from Earth Engine. It needs no manual data preparation and no edits to file paths in the code.
+
+**1. Install R and the packages** (once). Install [R](https://cran.r-project.org/) (and optionally [RStudio](https://posit.co/download/rstudio-desktop/)), then in R:
+
+```r
+install.packages(c("caret", "randomForest", "kernlab", "terra", "dplyr", "readr", "ggplot2"))
+```
+
+**2. Put the input files in one folder** (e.g. `data/`):
+
+| File | Source |
+|---|---|
+| `<crop>_veg_index_<year>.tif`, `<crop>_veg_index_by_county.csv` | `NDVI_EVI_HISTARFM.js` (corn and soybean) |
+| `<year>_temp_aug.tif`, `<year>_ppt_aug.tif`, `weather_aug_by_county.csv` | `Weather variables.js` |
+| `nass_corn_yield.csv`, `nass_soybean_yield.csv` | [USDA NASS Quick Stats](https://quickstats.nass.usda.gov/): county-level `YIELD, MEASURED IN BU / ACRE` for the 14 study counties, 2009–2019, downloaded as CSV. The script converts bu/acre to t/ha. |
+| `field_boundaries.gpkg` (or `.shp`) and `field_yield.csv` | *Optional*, for the independent field validation (see below). |
+
+**3. Run the script**, either from RStudio (set `data_dir` at the top of the script, then click **Source**) or from a terminal:
+
+```bash
+Rscript Yield_modeling_updated.R path/to/data path/to/output
+```
+
+**Settings** at the top of the script include the crops and years to map, and the model used for the maps (`selected_model`; MLR by default, as in the original script, or `"RF"`, `"SVM"`, or `"auto"` for the lowest cross-validation error).
+
+**Outputs** (in the output folder)
+
+| File | Contents |
+|---|---|
+| `model_accuracy.csv` | Cross-validation and test-set R², RMSE, MAE, and MAPE for MLR, RF, and SVM. |
+| `training_table_<crop>.csv` | County-year data used to fit the models. |
+| `obs_vs_pred_test_<crop>.png` | Observed vs. predicted county yields (test set). |
+| `models/<crop>_<model>.rds` | Fitted models. |
+| `yield_maps/<year>_<crop>_yield.tif` | Predicted yield (t/ha) for each crop and year. |
+| `field_validation.csv`, `field_validation_accuracy.csv`, `field_validation_<crop>.png` | Independent validation results, if field data are provided. |
+
+**Spatial consistency.** The yield maps are written on the same grid as the vegetation index rasters from Earth Engine: EPSG:4326, about 30 m, crop pixels only. The weather rasters (about 4 km) are resampled onto that grid with bilinear interpolation, as in the paper. The script stops with a message if a raster is in a different projection (for example, one exported with an older version of the Earth Engine scripts).
+
+**Independent field validation (optional).** Provide yield monitor data averaged per field and year:
+
+- `field_boundaries.gpkg` (or `.shp`): field polygons with a `field_id` column, in any projection.
+- `field_yield.csv`: columns `field_id`, `year`, `crop` (`corn` or `soybean`), and `yield_t_ha` (observed yield in t/ha).
+
+The script calculates the area-weighted mean predicted yield within each field and compares it with the observed yield. Fields with fewer than 10 predicted crop pixels are excluded. Without these files, the validation step is skipped.
+
+**Run time.** Mapping all 14 counties takes a few minutes per crop and year with MLR; RF and SVM take considerably longer.
+
+## Using the Original Modeling Script
+
+`Yield_modeling_field_scale.R` is the script used for the paper. It does not read the Earth Engine downloads directly: it reads a training table per crop (`regression_in_R_corn.csv`, `regression_in_R_soybean.csv`) and, for mapping, rasters with specific names. Set the working directory at the top of the script to your data folder.
 
 **1. Training table.** Download county-level yields (`YIELD, MEASURED IN BU / ACRE`) for the 14 study counties and 2009–2019 from [USDA NASS Quick Stats](https://quickstats.nass.usda.gov/) as a CSV (e.g. `nass_corn_yield.csv`), then join them with the two county CSVs:
 
@@ -145,11 +197,11 @@ Input data are **not included** in this repository.
 
 | Data | Source | Notes |
 |---|---|---|
-| County-level corn and soybean yields | [USDA NASS Quick Stats](https://quickstats.nass.usda.gov/) | Public. Join with the county CSVs from Earth Engine; see [Preparing inputs](#preparing-inputs-for-yield_modeling_field_scaler). |
+| County-level corn and soybean yields | [USDA NASS Quick Stats](https://quickstats.nass.usda.gov/) | Public. Read directly by `Yield_modeling_updated.R`; see [Running the yield model locally](#running-the-yield-model-locally). |
 | HISTARFM, CDL, PRISM | Earth Engine data catalog | Loaded directly by the GEE scripts. HISTARFM requires joining its Google group. |
 | Study-area boundaries | Public Earth Engine datasets (TIGER, WBD) | Built into the updated GEE scripts; see [Boundary files](#boundary-files) for the others. |
 | Winter cover crop maps (2008–2019) | KC et al. (2021); see the paper | Needed for step 4. |
-| Field yield monitor data | Partner farms | Used only for independent validation; not public. |
+| Field yield monitor data | Partner farms | Used only for independent validation; not public. Use your own field data in the format described under [Independent field validation](#running-the-yield-model-locally). |
 
 ### Boundary files
 
@@ -179,7 +231,7 @@ Use `counties` wherever a script reads `ohio_counties`, and `maumee` wherever it
 
 ## Notes for Reuse
 
-- **Local paths:** the R scripts set a working directory to a local path (e.g., `C:/Users/...`). Change this to the location of your own data before running.
+- **Local paths:** the original R scripts set a working directory to a local path (e.g., `C:/Users/...`). Change this to the location of your own data before running. `Yield_modeling_updated.R` takes the data folder as a setting or command-line argument instead.
 - **Retired R packages:** some R scripts load `rgdal` and `maptools`, which have been retired from CRAN. The `terra` and `sf` packages are the current replacements.
 - **Private assets:** `corn_soybean_masked.js` still references boundary assets stored in the author's account (`users/kessi9400/...`). Replace them with the public TIGER and WBD datasets shown under [Boundary files](#boundary-files).
 - **Retired datasets:** the updated GEE scripts use current datasets (HISTARFM and `OREGONSTATE/PRISM/ANd`, which replaces the deprecated `OREGONSTATE/PRISM/AN81d`). `corn_soybean_masked.js` still uses Landsat Collection 1 (`LANDSAT/.../C01/T1_SR`), which has been superseded by Collection 2 (e.g. `LANDSAT/LC08/C02/T1_L2`, with different band names and scaling).
@@ -192,7 +244,7 @@ Use `counties` wherever a script reads `ohio_counties`, and `maumee` wherever it
 - **HISTARFM (Landsat–MODIS fusion)** — vegetation indices (NDVI, EVI2).
 - **USDA NASS** — county-level yield statistics and the Cropland Data Layer.
 - **PRISM** — weather data.
-- **R** (`caret`, `randomForest`, `e1071`, `raster`, `ggplot2`) — modeling, raster processing, and visualization.
+- **R** (`caret`, `randomForest`, `kernlab`, `terra`, `ggplot2`; the original scripts also use `e1071` and `raster`) — modeling, raster processing, and visualization.
 
 Specific package versions and dataset requirements may differ between scripts.
 
