@@ -34,11 +34,13 @@
 #   <crop>_veg_index_<year>.tif, <year>_temp_aug.tif, <year>_ppt_aug.tif
 #                                                  (from the GEE scripts; tiled
 #                                                   exports are mosaicked)
-#   Optional, for the independent validation:
-#   field_boundaries.gpkg (or .shp)  polygons with a `field_id` column
-#   field_yield.csv                  columns field_id, year, crop, yield_t_ha
-#       (yield monitor data averaged per field and year, in t/ha; crop is
-#        "corn" or "soybean")
+#   Optional, for the independent validation, one shapefile per crop, either
+#   zipped or unzipped:
+#     Field_yield_corn_shapefile.zip     (or Field_yield_corn.shp)
+#     Field_yield_soybean_shapefile.zip  (or Field_yield_soybean.shp)
+#   Field polygons (any CRS) with a `Field` name column and yield monitor data
+#   averaged per field and year, in t/ha, in columns tha_<year> (e.g. tha_2019).
+#   Empty or 0 values mean no data for that crop and year.
 #   A ready-made training table regression_in_R_<crop>.csv (columns
 #   Value_ton_ha, mean.NDVI, mean.EVI2, mean_aug_temp, mean_aug_ppt) is used
 #   instead of the three CSVs if present.
@@ -50,6 +52,7 @@
 #   models/<crop>_<MLR|RF|SVM>.rds       fitted models
 #   yield_maps/<year>_<crop>_yield.tif   predicted yield (t/ha), EPSG:4326, 30 m
 #   field_validation.csv                 per field-year observed vs. predicted
+#                                        (with the number of predicted pixels)
 #   field_validation_accuracy.csv        R2, RMSE, MAE per crop
 #   field_validation_<crop>.png          observed vs. predicted per field-year
 #
@@ -57,8 +60,8 @@
 #   R/RStudio: set `data_dir` below, then source("Yield_modeling_updated.R")
 #   Terminal:  Rscript Yield_modeling_updated.R path/to/data [path/to/output]
 #
-# Packages: caret, randomForest, kernlab, terra, dplyr, readr, ggplot2
-#   install.packages(c("caret", "randomForest", "kernlab", "terra",
+# Packages: caret, randomForest, kernlab, terra, dplyr, tidyr, readr, ggplot2
+#   install.packages(c("caret", "randomForest", "kernlab", "terra", "tidyr",
 #                      "dplyr", "readr", "ggplot2"))
 # =============================================================================
 
@@ -92,10 +95,11 @@ selected_model <- c(corn = "MLR", soybean = "MLR")
 rf_settings <- list(corn    = list(mtry = 2, ntree = 800, maxnodes = 14),
                     soybean = list(mtry = 4, ntree = 300, maxnodes = 14))
 
-# Independent field validation (skipped if the files are missing)
-field_boundaries_file <- file.path(data_dir, "field_boundaries.gpkg")
-field_yield_file      <- file.path(data_dir, "field_yield.csv")
-min_field_pixels      <- 10   # ignore fields with fewer predicted crop pixels
+# Independent field validation (skipped for a crop if its shapefile is missing).
+# One shapefile per crop, zipped or not; yields in t/ha in columns tha_<year>.
+field_layers <- c(corn = "Field_yield_corn", soybean = "Field_yield_soybean")
+field_name_column <- "Field"
+min_field_pixels  <- 10   # ignore field-years with fewer predicted crop pixels
 
 expected_crs <- "EPSG:4326"   # CRS of the GEE raster exports
 
@@ -238,29 +242,67 @@ map_yield <- function(model, crop, year) {
 
 # ---- STEP 4: INDEPENDENT FIELD VALIDATION -----------------------------------
 
-validate_with_fields <- function(map_files) {
-  if (!file.exists(field_boundaries_file) || !file.exists(field_yield_file)) {
-    message("\nField validation skipped: ", basename(field_boundaries_file),
-            " and/or ", basename(field_yield_file), " not found in ", data_dir)
-    return(invisible(NULL))
+# Read a crop's field shapefile from data_dir: <name>_shapefile.zip, <name>.zip,
+# or <name>.shp. Zip files are read in place (no need to unzip).
+read_field_layer <- function(name) {
+  for (zip in file.path(data_dir, paste0(name, c("_shapefile.zip", ".zip")))) {
+    if (file.exists(zip)) {
+      shp <- grep(paste0("(^|/)", name, "\\.shp$"), unzip(zip, list = TRUE)$Name, value = TRUE)
+      if (length(shp) == 0) stop(basename(zip), " does not contain ", name, ".shp")
+      return(vect(paste0("/vsizip/", normalizePath(zip), "/", shp[1])))
+    }
   }
-  message("\n=== FIELD VALIDATION ===")
+  shp <- file.path(data_dir, paste0(name, ".shp"))
+  if (file.exists(shp)) return(vect(shp))
+  NULL
+}
 
-  fields <- vect(field_boundaries_file)
-  if (!"field_id" %in% names(fields)) stop("Field boundaries need a 'field_id' column.")
-  observed <- read_csv(field_yield_file, show_col_types = FALSE) %>%
-    mutate(field_id = as.character(field_id), year = as.integer(year),
-           crop = tolower(crop))
+# Field polygons and observed yields (long format) for one crop
+read_field_data <- function(crop) {
+  fields <- read_field_layer(field_layers[[crop]])
+  if (is.null(fields)) return(NULL)
+  if (!field_name_column %in% names(fields)) {
+    stop(field_layers[[crop]], " needs a '", field_name_column, "' column with field names.")
+  }
+  fields$field_id <- as.character(fields[[field_name_column]][[1]])
+  if (anyDuplicated(fields$field_id)) stop("Duplicate field names in ", field_layers[[crop]])
+
+  yield_cols <- grep("^tha_\\d{4}$", names(fields), value = TRUE)
+  if (length(yield_cols) == 0) stop(field_layers[[crop]], " has no tha_<year> yield columns.")
+  observed <- as.data.frame(fields)[, c("field_id", yield_cols)] %>%
+    tidyr::pivot_longer(-field_id, names_to = "year", values_to = "yield_t_ha") %>%
+    mutate(year = as.integer(sub("tha_", "", year)), crop = crop) %>%
+    filter(!is.na(yield_t_ha), yield_t_ha > 0)     # empty/0 = no data (shapefile limitation)
+
+  list(fields = fields, observed = observed)
+}
+
+validate_with_fields <- function(map_files) {
+  message("\n=== FIELD VALIDATION ===")
+  field_data <- list()
+  for (crop in unique(map_files$crop)) {
+    d <- read_field_data(crop)
+    if (is.null(d)) {
+      message("  ", crop, ": no ", field_layers[[crop]], " shapefile in ", data_dir, ", skipped")
+    } else {
+      message("  ", crop, ": ", nrow(d$fields), " fields, ", nrow(d$observed),
+              " field-years with observed yield")
+      field_data[[crop]] <- d
+    }
+  }
+  if (length(field_data) == 0) return(invisible(NULL))
 
   results <- list()
   for (i in seq_len(nrow(map_files))) {
     crop <- map_files$crop[i]; year <- map_files$year[i]
-    obs_cy <- filter(observed, crop == !!crop, year == !!year)
+    if (is.null(field_data[[crop]])) next
+    obs_cy <- filter(field_data[[crop]]$observed, year == !!year)
     if (nrow(obs_cy) == 0) next
 
     yield_map <- rast(map_files$file[i])
     # Field polygons -> yield-map CRS, so pixels and fields line up
-    fields_cy <- project(fields[as.character(fields$field_id) %in% obs_cy$field_id], yield_map)
+    fields <- field_data[[crop]]$fields
+    fields_cy <- project(fields[fields$field_id %in% obs_cy$field_id], yield_map)
 
     # Area-weighted mean of the predicted pixels inside each field
     px <- extract(yield_map, fields_cy, exact = TRUE)
@@ -281,10 +323,23 @@ validate_with_fields <- function(map_files) {
     message("  no field-years overlap the yield maps")
     return(invisible(NULL))
   }
-  dropped <- sum(val$n_pixels < min_field_pixels)
-  if (dropped > 0) message("  ", dropped, " field-year(s) with < ", min_field_pixels,
-                           " predicted crop pixels excluded")
-  val <- filter(val, n_pixels >= min_field_pixels)
+  # Field-years with observed yield but no yield map for that year/crop, or no
+  # predicted crop pixels in the field (e.g. the CDL shows another crop there)
+  all_obs <- bind_rows(lapply(field_data, `[[`, "observed"))
+  missing <- anti_join(all_obs, val, by = c("field_id", "year", "crop"))
+  if (nrow(missing) > 0) {
+    message("  ", nrow(missing), " field-year(s) not validated (no yield map or no predicted crop pixels): ",
+            paste0(missing$field_id, " ", missing$year, collapse = ", "))
+  }
+  dropped <- filter(val, n_pixels < min_field_pixels)
+  if (nrow(dropped) > 0) {
+    message("  ", nrow(dropped), " field-year(s) with < ", min_field_pixels,
+            " predicted crop pixels excluded: ",
+            paste0(dropped$field_id, " ", dropped$year, collapse = ", "))
+  }
+  val <- filter(val, n_pixels >= min_field_pixels) %>%
+    select(field_id, crop, year, yield_t_ha, predicted_t_ha, n_pixels) %>%
+    arrange(crop, field_id, year)
   write_csv(val, file.path(output_dir, "field_validation.csv"))
 
   acc <- val %>%
@@ -359,6 +414,6 @@ for (crop in crops) {
 
 write_csv(bind_rows(all_accuracy), file.path(output_dir, "model_accuracy.csv"))
 
-validate_with_fields(bind_rows(map_files))
+if (length(map_files) > 0) validate_with_fields(bind_rows(map_files))
 
 message("\nDone. Results written to: ", normalizePath(output_dir))
