@@ -34,13 +34,13 @@
 #   <crop>_veg_index_<year>.tif, <year>_temp_aug.tif, <year>_ppt_aug.tif
 #                                                  (from the GEE scripts; tiled
 #                                                   exports are mosaicked)
-#   Optional, for the independent validation, one shapefile per crop, either
-#   zipped or unzipped:
-#     Field_yield_corn_shapefile.zip     (or Field_yield_corn.shp)
-#     Field_yield_soybean_shapefile.zip  (or Field_yield_soybean.shp)
+#   Optional, for the independent validation, one layer per crop:
+#     Field_yield_corn.gpkg, Field_yield_soybean.gpkg   (preferred), or
+#     Field_yield_<crop>_shapefile.zip, or Field_yield_<crop>.shp
 #   Field polygons (any CRS) with a `Field` name column and yield monitor data
 #   averaged per field and year, in t/ha, in columns tha_<year> (e.g. tha_2019).
-#   Empty or 0 values mean no data for that crop and year.
+#   NULL/NA means no data for that crop and year. (Shapefiles cannot store
+#   true NULLs and ArcGIS shows them as 0, so 0 is also treated as no data.)
 #   A ready-made training table regression_in_R_<crop>.csv (columns
 #   Value_ton_ha, mean.NDVI, mean.EVI2, mean_aug_temp, mean_aug_ppt) is used
 #   instead of the three CSVs if present.
@@ -95,8 +95,8 @@ selected_model <- c(corn = "MLR", soybean = "MLR")
 rf_settings <- list(corn    = list(mtry = 2, ntree = 800, maxnodes = 14),
                     soybean = list(mtry = 4, ntree = 300, maxnodes = 14))
 
-# Independent field validation (skipped for a crop if its shapefile is missing).
-# One shapefile per crop, zipped or not; yields in t/ha in columns tha_<year>.
+# Independent field validation (skipped for a crop if its layer is missing).
+# One GeoPackage or shapefile per crop; yields in t/ha in columns tha_<year>.
 field_layers <- c(corn = "Field_yield_corn", soybean = "Field_yield_soybean")
 field_name_column <- "Field"
 min_field_pixels  <- 10   # ignore field-years with fewer predicted crop pixels
@@ -242,14 +242,18 @@ map_yield <- function(model, crop, year) {
 
 # ---- STEP 4: INDEPENDENT FIELD VALIDATION -----------------------------------
 
-# Read a crop's field shapefile from data_dir: <name>_shapefile.zip, <name>.zip,
-# or <name>.shp. Zip files are read in place (no need to unzip).
+# Read a crop's field layer from data_dir, in this order:
+#   <name>.gpkg (preferred: stores no-data years as true NULL),
+#   <name>_shapefile.zip or <name>.zip (containing <name>.gpkg or <name>.shp;
+#   read in place, no need to unzip), or <name>.shp.
 read_field_layer <- function(name) {
+  gpkg <- file.path(data_dir, paste0(name, ".gpkg"))
+  if (file.exists(gpkg)) return(vect(gpkg))
   for (zip in file.path(data_dir, paste0(name, c("_shapefile.zip", ".zip")))) {
     if (file.exists(zip)) {
-      shp <- grep(paste0("(^|/)", name, "\\.shp$"), unzip(zip, list = TRUE)$Name, value = TRUE)
-      if (length(shp) == 0) stop(basename(zip), " does not contain ", name, ".shp")
-      return(vect(paste0("/vsizip/", normalizePath(zip), "/", shp[1])))
+      inside <- grep(paste0("(^|/)", name, "\\.(gpkg|shp)$"), unzip(zip, list = TRUE)$Name, value = TRUE)
+      if (length(inside) == 0) stop(basename(zip), " does not contain ", name, ".gpkg or ", name, ".shp")
+      return(vect(paste0("/vsizip/", normalizePath(zip), "/", sort(inside)[1])))   # .gpkg before .shp
     }
   }
   shp <- file.path(data_dir, paste0(name, ".shp"))
@@ -272,7 +276,7 @@ read_field_data <- function(crop) {
   observed <- as.data.frame(fields)[, c("field_id", yield_cols)] %>%
     tidyr::pivot_longer(-field_id, names_to = "year", values_to = "yield_t_ha") %>%
     mutate(year = as.integer(sub("tha_", "", year)), crop = crop) %>%
-    filter(!is.na(yield_t_ha), yield_t_ha > 0)     # empty/0 = no data (shapefile limitation)
+    filter(!is.na(yield_t_ha), yield_t_ha > 0)     # NULL = no data; 0 too (ArcGIS shows shapefile NULLs as 0)
 
   list(fields = fields, observed = observed)
 }
@@ -283,7 +287,7 @@ validate_with_fields <- function(map_files) {
   for (crop in unique(map_files$crop)) {
     d <- read_field_data(crop)
     if (is.null(d)) {
-      message("  ", crop, ": no ", field_layers[[crop]], " shapefile in ", data_dir, ", skipped")
+      message("  ", crop, ": no ", field_layers[[crop]], " layer (.gpkg, .zip or .shp) in ", data_dir, ", skipped")
     } else {
       message("  ", crop, ": ", nrow(d$fields), " fields, ", nrow(d$observed),
               " field-years with observed yield")
